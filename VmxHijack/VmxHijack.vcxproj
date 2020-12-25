@@ -66,6 +66,7 @@
     <ClCompile Include="main.cpp" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="config.hpp" />
     <ClInclude Include="logger.hpp" />
     <ClInclude Include="vmx.hpp" />
   </ItemGroup>

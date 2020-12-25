@@ -32,8 +32,7 @@
 #include <iostream>
 #include <string>
 #include <mutex>
-
-#define VMX_NO_CONSOLE 0
+#include "config.hpp"
 
 enum console_color
 {

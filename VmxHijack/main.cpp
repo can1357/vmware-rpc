@@ -33,6 +33,7 @@
 #include <nt/image.hpp>
 #include "logger.hpp"
 #include "vmx.hpp"
+#include "config.hpp"
 
 // Finds the log GuestRPC handler and hooks it, the methods used to find it are very simplistic
 // but it should not be an issue given that it's tailored to the way this image is linked and compiled.
@@ -49,8 +50,10 @@ static void try_hook( win::image_x64_t* vmx )
 		return logger::error( "Failed hooking the vmx image: image not found." );
 	win::nt_headers_x64_t* nt = vmx->get_nt_headers();
 	win::section_header_t* scns = nt->get_sections();
+#if VMX_VERBOSE
 	logger::print<CON_PRP>( "- Located 'vmware-vmx.exe' at [%p - %p]\n", vmx, vmx->raw_to_ptr( nt->optional_header.size_image ) );
-	
+#endif
+
 	// Find "Guest: %s%s" in '.rdata'.
 	//
 	std::unordered_set<uint64_t> string_entries;
@@ -68,9 +71,11 @@ static void try_hook( win::image_x64_t* vmx )
 		}
 	}
 
+#if VMX_VERBOSE
 	logger::print<CON_PRP>( " - Found %d match(es) of the string '%s'%c\n", string_entries.size(), target_string, string_entries.empty() ? '.' : ':' );
 	for ( auto va : string_entries )
 		logger::print<CON_BRG>( "  - .rdata:%p\n", va );
+#endif
 	if ( string_entries.empty() )
 		return logger::error( "Failed string search." );
 
@@ -96,9 +101,11 @@ static void try_hook( win::image_x64_t* vmx )
 		}
 	}
 
+#if VMX_VERBOSE
 	logger::print<CON_PRP>( " - Found %d instruction(s) referencing the string%c\n", code_references.size(), code_references.empty() ? '.' : ':' );
 	for ( auto va : code_references )
 		logger::print<CON_BRG>( "  - .text:%p\n", va );
+#endif
 	if ( code_references.size() != 1 )
 		return logger::error( "Failed instruction search." );
 
@@ -128,7 +135,9 @@ static void try_hook( win::image_x64_t* vmx )
 	//
 	memcpy( instruction, hook, sizeof( hook ) );
 	VirtualProtect( instruction, sizeof( hook ), old, &old );
+#if VMX_VERBOSE
 	logger::print<CON_GRN>( " - Successfully hooked the 'log' vmx handler, initialization complete!\n\n" );
+#endif
 }
 
 // Hook the vmx RPC handler on DLL initialization.
