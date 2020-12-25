@@ -40,7 +40,7 @@ extern "C" __declspec( dllexport ) uint64_t DirectSoundCreate( uint64_t a, uint6
 	static void* real_func = [ ] () -> void*
 	{
 		std::wstring nt_path = ( const wchar_t* ) 0x7FFE0030;
-		nt_path += L"dsound.dll";
+		nt_path += L"system32\\dsound.dll";
 
 		if ( HMODULE lib = LoadLibraryW( nt_path.c_str() ); lib && lib != &__ImageBase )
 		{
