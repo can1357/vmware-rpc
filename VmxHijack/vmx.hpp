@@ -58,7 +58,7 @@ bool vmx_log_handler(
 
 	// Write dummy output.
 	//
-	*out = "OK";
-	*out_length = 2;
+	*out = "";
+	*out_length = 0;
 	return true;
 }
