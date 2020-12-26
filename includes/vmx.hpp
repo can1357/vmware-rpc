@@ -29,9 +29,11 @@
 #pragma once
 #include <stdint.h>
 #include <string>
+#include <cstring>
+#include <string_view>
 #include <optional>
 #include <tuple>
-#include <string_view>
+#include <initializer_list>
 
 namespace vmx
 {
@@ -349,10 +351,9 @@ namespace vmx
 				if ( channel.send_msg( { "log ", msg_0, ( std::string_view ) msg_n... } ) )
 				{
 					channel.reset();
-					return;
+					break;
 				}
-				else
-					channel.restart();
+				channel.restart();
 			}
 		}
 	}
