@@ -40,7 +40,8 @@ bool vmx_log_handler(
 //
 extern "C" int32_t DriverEntry()
 {
-	DbgPrint( "=> %s\n", vmx::send( "Hello from guest Ring0 to Host!" )->c_str() );
+	auto [success, reply] = vmx::send( "Hello from guest Ring0 to Host!" );
+	DbgPrint( "=> %s\n", reply.c_str() );
 	return -1;
 }
 ```

@@ -30,6 +30,7 @@
 #include <stdint.h>
 #include <string>
 #include <optional>
+#include <tuple>
 #include <string_view>
 
 namespace vmx
@@ -131,6 +132,7 @@ namespace vmx
 		{
 			if ( is_valid() )
 				send_command( bdoor_cmd::message, {}, message_type::close, channel_number );
+			channel_number = 0xFFFF;
 		}
 
 		// Restarts the channel.
@@ -141,69 +143,120 @@ namespace vmx
 			return operator=( open() );
 		}
 
-		// Sends a message and gets a reply, empty on failure, any valid VMWare reply will be at least 2 bytes.
+		// Internal send/recv functions.
 		//
-		std::string send( std::string msg ) const
+		bool send_msg( const std::initializer_list<std::string_view>& segments )
 		{
-			// Fail if invalid channel.
-			//
-			if ( !is_valid() )
-				return {};
-
-			// Align string length to 4-bytes.
-			//
-			size_t original_length = msg.size();
-			msg.resize( ( msg.size() + 3 ) & ~3 );
-
-			// Send the length, propagate failure.
-			//
-			message_result result;
-			result.raw = send_command( 
-				bdoor_cmd::message, 
-				original_length, 
-				message_type::send_size, 
-				channel_number 
-			)[ 2 ];
-			if ( !result.success || result.checkpoint )
-				return {};
-
-			// Iterate the message in u32 boundaries:
-			//
-			for ( size_t it = 0; it != msg.size(); it += 4 )
+			size_t total_msg_length = 0;
+			for ( auto& n : segments )
+				total_msg_length += n.size();
+			auto read4 = [ & ] ( size_t it ) -> uint32_t
 			{
-				// Send the partial command, propagate failure.
+				// Enumerate every segment:
+				//
+				uint32_t dword = 0;
+				size_t pos = 0, epos = 0;
+				for ( auto& msg : segments )
+				{
+					pos = epos;
+
+					// If beyond limit, break, we're done.
+					//
+					if ( pos >= ( it + 4 ) )
+						return dword;
+
+					// If before limit, skip.
+					//
+					epos = pos + msg.size();
+					if ( epos <= it )
+						continue;
+
+					// Copy the relevant part.
+					//
+					char* dbegin = ( char* ) &dword;
+					const char* sbegin = msg.data();
+					if ( pos < it ) sbegin += it - pos;
+					else            dbegin += pos - it;
+					memcpy( dbegin, sbegin, std::min<size_t>( epos - it, 4 ) );
+				}
+				return dword;
+			};
+
+			while( true )
+			{
+				message_result result = { .raw = 0 };
+
+				// Send the length.
 				//
 				result.raw = send_command( 
 					bdoor_cmd::message, 
-					*( const uint32_t* )( msg.data() + it ), 
-					message_type::send_payload, 
+					total_msg_length,
+					message_type::send_size, 
 					channel_number 
 				)[ 2 ];
-				if ( !result.success || result.checkpoint )
-					return {};
-			}
-			
-			// Get the reply length.
-			//
-			auto [_, reply_length, reply_result, reply_id] = send_command(
-				bdoor_cmd::message,
-				{},
-				message_type::recv_size,
-				channel_number
-			);
-			result.raw = reply_result;
-			reply_id >>= 16;
-			if ( !result.success || result.checkpoint )
-				return {};
+				if ( !result.success )
+					return false;
 
-			// If there is a reply:
-			//
-			if ( result.dorecv )
+				// Iterate the message in u32 boundaries:
+				//
+				for ( size_t it = 0; it < total_msg_length; it += 4 )
+				{
+					// Send the partial command, propagate failure.
+					//
+					result.raw = send_command( 
+						bdoor_cmd::message,
+						read4( it ) , 
+						message_type::send_payload, 
+						channel_number 
+					)[ 2 ];
+
+					// If server reported a checkpoint, retry the entire operation.
+					//
+					if ( result.checkpoint )
+						break;
+
+					// If server reported an error, fail.
+					//
+					if ( !result.success )
+						return false;
+				}
+
+				// If no retry required, quit.
+				//
+				if ( !result.checkpoint )
+					return true;
+			}
+			return false;
+		}
+		std::optional<std::string> recv_reply()
+		{
+			std::string buffer;
+			while ( true )
 			{
+				message_result result = { .raw = 0 };
+
+				// Get the reply length.
+				//
+				auto [_, reply_length, reply_result, reply_id] = send_command(
+					bdoor_cmd::message,
+					{},
+					message_type::recv_size,
+					channel_number
+				);
+				result.raw = reply_result;
+				reply_id >>= 16;
+				if ( !result.success )
+					return std::nullopt;
+
+				// If there is no reply, return empty string.
+				//
+				if( !result.dorecv )
+					return std::string{};
+
 				// Resize the buffer to 4-byte aligned reply length.
 				//
-				msg.resize( ( reply_length + 3 ) & ~3 );
-				for ( size_t it = 0; it != msg.size(); it += 4 )
+				buffer.resize( ( reply_length + 3 ) & ~3 );
+				for ( size_t it = 0; it != buffer.size(); it += 4 )
 				{
 					// Fetch the partial reply, propagate failure.
 					//
@@ -214,41 +267,55 @@ namespace vmx
 						channel_number
 					);
 					result.raw = recv_result;
-					if ( !result.success || result.checkpoint )
-					{
-						// Instead of returning clear result and let it continue instead,
-						// we want to call recv_status.
-						//
-						reply_length = 0;
+
+					// If server reported a checkpoint, retry the entire operation.
+					//
+					if ( result.checkpoint )
 						break;
-					}
-					*( uint32_t* ) ( msg.data() + it ) = data;
+
+					// If server reported an error, fail.
+					//
+					if ( !result.success )
+						return std::nullopt;
+
+					// Otherwise write the partial reply.
+					//
+					*( uint32_t* ) ( buffer.data() + it ) = data;
 				}
+
+				// Handle checkpoints.
+				//
+				if ( result.checkpoint )
+					continue;
 
 				// Resize to the real reply size.
 				//
-				msg.resize( reply_length );
-			}
-			// Otherwise return fake success;
-			//
-			else
-			{
-				msg.resize( 2 );
-				msg[ 0 ] = '1';
-				msg[ 1 ] = ' ';
-			}
+				buffer.resize( reply_length );
 
-			// Finish the reply, return the result.
-			//
-			result.raw = send_command(
-				bdoor_cmd::message,
-				reply_id,
-				message_type::recv_status,
-				channel_number
-			)[ 2 ];
-			if ( !result.success || result.checkpoint )
-				return {};
-			return msg;
+				// Finish the reply and return the final message.
+				//
+				result.raw = send_command(
+					bdoor_cmd::message,
+					reply_id,
+					message_type::recv_status,
+					channel_number
+				)[ 2 ];
+				if ( !result.success )
+					return std::nullopt;
+				if ( result.checkpoint )
+					continue;
+				return buffer;
+			}
+			return std::nullopt;
+		}
+
+		// Combined send.
+		//
+		std::optional<std::string> send( const std::initializer_list<std::string_view>& segments )
+		{
+			if ( !send_msg( segments ) )
+				return std::nullopt;
+			return recv_reply();
 		}
 
 		// Destructor cleans up the host resources.
@@ -266,33 +333,63 @@ namespace vmx
 		return g_channel;
 	}
 
-	// Sends a message and returns the reply, first two bytes usually signify state.
+	// Sends a message and ignores the reply.
 	//
-	inline std::optional<std::string> send( const std::string_view& str )
+	template<typename... Tx>
+	inline void send_n( std::string_view msg_0, Tx&&... msg_n )
 	{
 		// If there is a valid channel:
 		//
-		std::string result;
 		if ( auto& channel = get_channel() )
 		{
-			// For up to three times:
+			// Try sending the message, retry up to three times.
 			//
 			for ( size_t n = 0; n != 3; n++ )
 			{
-				// Try logging the message, if we've got a result, return.
-				//
-				result = channel.send( "log " + std::string{ str } );
-				if ( !result.empty() )
-					break;
-				channel.restart();
+				if ( channel.send_msg( { "log ", msg_0, ( std::string_view ) msg_n... } ) )
+				{
+					channel.reset();
+					return;
+				}
+				else
+					channel.restart();
 			}
 		}
+	}
 
-		if ( result.starts_with( "1 " ) )
+	// Sends a message and returns the reply.
+	//
+	template<typename... Tx>
+	inline std::pair<bool, std::string> send( std::string_view msg_0, Tx&&... msg_n )
+	{
+		bool success = false;
+		std::string result = {};
+
+		// If there is a valid channel:
+		//
+		if ( auto& channel = get_channel() )
 		{
-			result.erase( result.begin(), result.begin() + 2 );
-			return result;
+			// Try sending the message, retry up to three times.
+			//
+			for ( size_t n = 0; n != 3; n++ )
+			{
+				if ( auto res = channel.send( { "log ", msg_0, ( std::string_view ) msg_n... } ) )
+				{
+					success = true;
+					result = std::move( res ).value();
+					break;
+				}
+				channel.restart();
+			}
+
+			// If reply starts with standard VMWare header, parse it.
+			//
+			if ( result.starts_with( "0 " ) )
+				success = false, result.erase( result.begin(), result.begin() + 2 );
+			else if ( result.starts_with( "1 " ) )
+				success = true, result.erase( result.begin(), result.begin() + 2 );
 		}
-		return std::nullopt;
+
+		return std::pair{ success, std::move( result ) };
 	}
 };
